@@ -1,4 +1,7 @@
+use core::convert::TryFrom;
+use serde_derive::{Deserialize, Serialize};
 use std::{
+    convert::TryInto,
     env, error as std_err,
     fmt::{Display, Error as fmt_err, Formatter},
     fs,
@@ -8,8 +11,6 @@ use std::{
     result,
     time::{Duration, SystemTime},
 };
-
-use serde_derive::{Deserialize, Serialize};
 
 mod credentials;
 use credentials::OauthCredentials;
@@ -131,10 +132,10 @@ impl Auth {
             ])
             .send()
             .await?
-            .json::<Token>()
+            .json::<MaybeToken>()
             .await?;
 
-        Ok(tkn)
+        tkn.try_into()
     }
 
     async fn refresh_token(&self, credentials: &OauthCredentials) -> Result<Token> {
@@ -156,10 +157,10 @@ impl Auth {
             ])
             .send()
             .await?
-            .json::<Token>()
+            .json::<MaybeToken>()
             .await?;
 
-        Ok(tkn)
+        tkn.try_into()
     }
 
     fn cache_token(&self, tkn: Token) -> Result<Token> {
@@ -213,12 +214,52 @@ impl Auth {
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq)]
+pub struct MaybeToken {
+    pub error: Option<String>,
+    pub error_description: Option<String>,
+    pub access_token: Option<String>,
+    pub expires_in: Option<u64>,
+    pub refresh_token: Option<String>,
+    pub scope: Option<String>,
+    pub token_type: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Debug, PartialEq)]
 pub struct Token {
     pub access_token: String,
     pub expires_in: u64,
     pub refresh_token: Option<String>,
     pub scope: Option<String>,
     pub token_type: String,
+}
+
+impl TryFrom<MaybeToken> for Token {
+    type Error = errors::Error;
+
+    fn try_from(value: MaybeToken) -> core::result::Result<Self, Self::Error> {
+        match value.error {
+            Some(e) => Err(Error::TokenRequestError(format!(
+                "error: {}, error_description: {}",
+                e,
+                value
+                    .error_description
+                    .unwrap_or_else(|| "unknown".to_string())
+            ))),
+            None => Ok(Token {
+                access_token: value.access_token.ok_or_else(|| {
+                    Error::TokenRequestError("Missing access_token from server".to_string())
+                })?,
+                expires_in: value.expires_in.ok_or_else(|| {
+                    Error::TokenRequestError("Missing expires_in from server".to_string())
+                })?,
+                refresh_token: value.refresh_token,
+                scope: value.scope,
+                token_type: value.token_type.ok_or_else(|| {
+                    Error::TokenRequestError("Missing token_type from server".to_string())
+                })?,
+            }),
+        }
+    }
 }
 
 impl Token {

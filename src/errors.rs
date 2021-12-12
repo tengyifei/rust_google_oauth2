@@ -15,6 +15,7 @@ pub enum Error {
     RedirectUriCfgError,
     UserError(Box<dyn error::Error>),
     RefreshTokenValue,
+    TokenRequestError(String),
 }
 
 unsafe impl Send for Error {}
@@ -33,6 +34,7 @@ impl cmp::PartialEq for Error {
             (Error::RedirectUriCfgError, Error::RedirectUriCfgError) => true,
             (Error::UserError(_), Error::UserError(_)) => true,
             (Error::RefreshTokenValue, Error::RefreshTokenValue) => true,
+            (Error::TokenRequestError(s1), Error::TokenRequestError(s2)) => s1 == s2,
             (_, _) => false,
         }
     }
@@ -55,6 +57,9 @@ impl fmt::Display for Error {
             Error::UserError(ref e) => e.fmt(f),
             Error::RefreshTokenValue => {
                 write!(f, "expected a refresh token string value, got None")
+            }
+            Error::TokenRequestError(ref s) => {
+                write!(f, "oauth server returned error: {}", s)
             }
         }
     }
