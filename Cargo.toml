@@ -5,10 +5,14 @@ authors = ["Siamion Makarski <s.makarski.s@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-url = "1.7.2"
+url = "2.2"
 serde = "1"
-serde_json = "1.0.38"
-serde_derive = "1"
-dirs = "1.0"
-reqwest = "0.9.11"
-mockito = "0.17.0"
+serde_json = "1.0"
+serde_derive = "1.0"
+dirs = "3.0"
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+mockito = "0.30.0"
+
+[dev-dependencies]
+tokio-test = "*"
+serial_test = "*"

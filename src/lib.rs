@@ -54,33 +54,33 @@ impl Auth {
         }
     }
 
-    pub fn access_token<F>(&self, get_auth_code: F) -> Result<Token>
+    pub async fn access_token<F>(&self, get_auth_code: F) -> Result<Token>
     where
         F: Fn(String) -> result::Result<String, Box<dyn std_err::Error>>,
     {
         let tkn_filekey = self.access_token_filekey()?;
         let crds_cfg = credentials::read_oauth_config(&self.crd_path)?.installed;
 
-        token_from_file(tkn_filekey.as_path())
-            .or_else(|_| {
-                credentials::auth_code_uri_str(&crds_cfg, &self.scope)
-                    .and_then(|consent_uri| {
-                        get_auth_code(consent_uri).map_err(|err| Error::UserError(err))
-                    })
-                    .and_then(|auth_code| self.exchange_auth_code(auth_code, &crds_cfg))
-                    .and_then(|tkn| self.cache_token(tkn))
-            })
-            .and_then(|tkn| {
-                if self.token_is_valid(&tkn, tkn_filekey.as_path()) {
-                    Ok(tkn)
-                } else {
-                    self.refresh_token(&crds_cfg)
-                        .and_then(|tkn| self.cache_token(tkn))
-                }
-            })
+        let token = match token_from_file(tkn_filekey.as_path()) {
+            Ok(tkn) => tkn,
+            Err(_) => {
+                let consent_uri = credentials::auth_code_uri_str(&crds_cfg, &self.scope)?;
+                let auth_code = get_auth_code(consent_uri).map_err(|err| Error::UserError(err))?;
+                let token = self.exchange_auth_code(auth_code, &crds_cfg).await?;
+                self.cache_token(token)?
+            }
+        };
+
+        if self.token_is_valid(&token, tkn_filekey.as_path()).await {
+            Ok(token)
+        } else {
+            self.refresh_token(&crds_cfg)
+                .await
+                .and_then(|tkn| self.cache_token(tkn))
+        }
     }
 
-    fn token_is_valid<P: AsRef<Path>>(&self, tkn: &Token, p: P) -> bool {
+    async fn token_is_valid<P: AsRef<Path>>(&self, tkn: &Token, p: P) -> bool {
         if !self.token_is_expired(tkn, p) {
             return true;
         }
@@ -90,7 +90,7 @@ impl Auth {
             self.validate_token_host, tkn.access_token
         );
 
-        let resp = self._http_client.get(url.as_str()).send();
+        let resp = self._http_client.get(url.as_str()).send().await;
         match resp {
             Ok(t) => t.status() == reqwest::StatusCode::OK,
             Err(_) => false,
@@ -114,7 +114,7 @@ impl Auth {
         }
     }
 
-    fn exchange_auth_code(
+    async fn exchange_auth_code(
         &self,
         auth_code: String,
         credentials: &OauthCredentials,
@@ -129,13 +129,15 @@ impl Auth {
                 ("client_id", credentials.client_id.as_str()),
                 ("redirect_uri", credentials.redirect_uri()?),
             ])
-            .send()?
-            .json::<Token>()?;
+            .send()
+            .await?
+            .json::<Token>()
+            .await?;
 
         Ok(tkn)
     }
 
-    fn refresh_token(&self, credentials: &OauthCredentials) -> Result<Token> {
+    async fn refresh_token(&self, credentials: &OauthCredentials) -> Result<Token> {
         let refresh_token = token_from_file(self.refresh_token_filekey()?)?;
 
         let refresh_tkn_str = match refresh_token.refresh_token {
@@ -152,8 +154,10 @@ impl Auth {
                 ("refresh_token", refresh_tkn_str.as_str()),
                 ("grant_type", "refresh_token"),
             ])
-            .send()?
-            .json::<Token>()?;
+            .send()
+            .await?
+            .json::<Token>()
+            .await?;
 
         Ok(tkn)
     }
@@ -248,9 +252,11 @@ fn validate_host() -> String {
 mod tests {
     use super::*;
     use mockito::mock;
+    use serial_test::serial;
     use std::{fs, io, thread::sleep, time::Duration};
 
     #[test]
+    #[serial]
     fn token_path_success() {
         let auth = Auth::new("token_path_success", &[], PathBuf::new());
 
@@ -283,6 +289,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn access_token_filekey_success() {
         let auth = Auth::new("myapp", &[], PathBuf::new());
 
@@ -294,6 +301,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn refresh_token_filekey_success() {
         let auth = Auth::new("myapp", &[], PathBuf::new());
 
@@ -305,6 +313,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn token_from_file_success() {
         let token_json = test_token_fixture_string(3600, Some("refresh_token_value"));
         assert!(fs::write("testfile.json", &token_json).is_ok());
@@ -321,6 +330,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn token_from_file_deserialize_error() {
         let token_json = r#"{eapis.com/auth/calendar.events}"#;
         assert!(fs::write("testfile_de_err.json", token_json).is_ok());
@@ -332,6 +342,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn token_from_file_read_error() {
         let expected_io_err = io::Error::new(
             io::ErrorKind::NotFound,
@@ -346,6 +357,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn token_is_expired() {
         let auth = Auth::new("token_is_expired", &[], PathBuf::new());
 
@@ -388,7 +400,14 @@ mod tests {
         }
     }
 
+    macro_rules! aw {
+        ($e:expr) => {
+            tokio_test::block_on($e)
+        };
+    }
+
     #[test]
+    #[serial]
     fn token_is_valid() {
         setup_token_validate_host();
         let auth = Auth::new("token_is_valid", &[], PathBuf::new());
@@ -437,7 +456,7 @@ mod tests {
                 .with_status(status_code)
                 .create();
 
-                let actual = auth.token_is_valid(&tkn_deserialized, filename);
+                let actual = aw!(auth.token_is_valid(&tkn_deserialized, filename));
                 m.assert();
                 assert_eq!(actual, expected, "scenario failed: {}", scenario);
                 mockito::reset();
@@ -449,6 +468,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn exchange_auth_code_success() {
         let host = &mockito::server_url();
 
@@ -464,7 +484,7 @@ mod tests {
             .with_body(&expected_token_str)
             .create();
 
-        let obtained = auth.exchange_auth_code("myauth_code".to_owned(), crds);
+        let obtained = aw!(auth.exchange_auth_code("myauth_code".to_owned(), crds));
         m.assert();
         assert_eq!(
             obtained,
@@ -475,6 +495,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn exchange_auth_code_deserialize_error() {
         let host = &mockito::server_url();
 
@@ -487,9 +508,8 @@ mod tests {
             .with_body("{asdasdas")
             .create();
 
-        let obtained_err = auth
-            .exchange_auth_code("myauth_code".to_owned(), crds)
-            .unwrap_err();
+        let obtained_err =
+            aw!(auth.exchange_auth_code("myauth_code".to_owned(), crds)).unwrap_err();
 
         m.assert();
         assert!(
@@ -502,6 +522,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn refresh_token_success() {
         setup_token_storage_dir();
 
@@ -525,7 +546,7 @@ mod tests {
             .create();
 
         let credentials = test_credentials_fixture(host);
-        let obtained = auth.refresh_token(&credentials);
+        let obtained = aw!(auth.refresh_token(&credentials));
         m.assert();
 
         let expected = test_token_fixture(expected_string.as_bytes());
@@ -540,6 +561,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn refresh_token_read_err() {
         let auth = Auth::new("refresh_token_read_err", &[], PathBuf::new());
         let crds = &test_credentials_fixture("somehost");
@@ -552,13 +574,14 @@ mod tests {
         let expected_err_msg = expected_io_err.to_string();
 
         let expected_err = Error::IOError(expected_io_err);
-        let obtained_err = auth.refresh_token(crds).unwrap_err();
+        let obtained_err = aw!(auth.refresh_token(crds)).unwrap_err();
 
         assert_eq!(obtained_err, expected_err);
         assert_eq!(obtained_err.to_string(), expected_err_msg);
     }
 
     #[test]
+    #[serial]
     fn refresh_token_empty_refresh_val() {
         setup_token_storage_dir();
 
@@ -573,7 +596,7 @@ mod tests {
         )
         .is_ok());
 
-        let obtained_err = auth.refresh_token(crds).unwrap_err();
+        let obtained_err = aw!(auth.refresh_token(crds)).unwrap_err();
         assert_eq!(obtained_err, Error::RefreshTokenValue);
 
         fs::remove_file(auth.refresh_token_filekey().unwrap())
@@ -583,6 +606,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn refresh_token_unmarshal_err() {
         setup_token_storage_dir();
 
@@ -601,7 +625,7 @@ mod tests {
 
         let m = mock("POST", "/token").with_body("{aaaaa").create();
 
-        let obtained_err = auth.refresh_token(crds).unwrap_err();
+        let obtained_err = aw!(auth.refresh_token(crds)).unwrap_err();
         m.assert();
 
         assert!(
@@ -619,6 +643,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn cache_token_success() {
         setup_token_storage_dir();
 
@@ -650,6 +675,7 @@ mod tests {
     // fn cache_token_write_json_err() {}
 
     #[test]
+    #[serial]
     fn token_filekeys_success() {
         let access_tkn_json = test_token_fixture_string(3600, None);
         let access_token = test_token_fixture(access_tkn_json.as_bytes());
