@@ -55,7 +55,7 @@ impl Auth {
         }
     }
 
-    pub async fn access_token<F>(&self, get_auth_code: F) -> Result<Token>
+    pub async fn access_token<F>(&self, get_auth_code: &F) -> Result<Token>
     where
         F: Fn(String) -> result::Result<String, Box<dyn std_err::Error>>,
     {
